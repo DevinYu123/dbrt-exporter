@@ -9,7 +9,7 @@ Collect the response time of MySQL, mongodb and redis.
 # help
 ./dbrt_exporter --help
 Usage of ./dbrt_exporter:
---addr string              The address to listen on for HTTP requests. ENV DBRTADDR. (default ":8306")
+\--addr string              The address to listen on for HTTP requests. ENV DBRTADDR. (default ":8306")
 --config string            configuration file specifying. ENV DBRTCONFIG.
 --enables string           The swich for collectting metrics of mysql, redis or mongodb. separated by commas. ENV DBRTENABLES.
 --mongo.db string          The mongo database. ENV DBRTMONGODB. (default "dbrt")
