@@ -7,5 +7,5 @@ db.createUser({user: 'dbrt', pwd: 'dbrt', roles: [{'role' : 'readWrite', 'db' : 
 create database dbrt;
 create table dbrt.dbrt (id int(11) NOT NULL DEFAULT '0',dbrt_time datetime DEFAULT NULL,PRIMARY KEY (id));
 insert into dbrt.dbrt value(1,now());
-create user dbrt@'%' identified by 'dbrt';
+create user dbrt@'%' identified by 'dbrt' WITH MAX_USER_CONNECTIONS 3;
 grant select,insert,update,delete on dbrt.* to dbrt@'%';
