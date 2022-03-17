@@ -4,31 +4,35 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type Mongort struct {
-	Mongoinstences string
-	Mongouser      string
-	Mongopassword  string
-	Mongodb        string
-	Mutithreads    int
+	Mongoinstances *string
+	Mongouser      *string
+	Mongopassword  *string
+	Mongodb        *string
+	Mutithreads    *int
 }
 
 type DbrtFind struct {
 	Dbrt int64
 }
 
-func (m Mongort) GetMongort(mongoinstence string) (map[string]float64, error) {
+type IsMaster struct {
+	IsMaster bool `bson:"ismaster"`
+}
+
+func (m Mongort) GetMongort(mongoinstance string) (map[string]float64, error) {
 	rt := map[string]float64{
 		"connect_rt": -1,
 		"delete_rt":  -1,
@@ -37,9 +41,12 @@ func (m Mongort) GetMongort(mongoinstence string) (map[string]float64, error) {
 		"find_rt":    -1,
 	}
 
-	var dbrtfind DbrtFind
+	var (
+		dbrtfind DbrtFind
+		ismaster IsMaster
+	)
 
-	uri := fmt.Sprintf("mongodb://%s:%s@%s/%s?authSource=%s", m.Mongouser, m.Mongopassword, mongoinstence, m.Mongodb, m.Mongodb)
+	uri := fmt.Sprintf("mongodb://%s:%s@%s/%s?authSource=%s", *m.Mongouser, *m.Mongopassword, mongoinstance, *m.Mongodb, *m.Mongodb)
 
 	opts := options.Client().ApplyURI(uri)
 	opts.SetAppName("dbrt-exporter")
@@ -65,7 +72,7 @@ func (m Mongort) GetMongort(mongoinstence string) (map[string]float64, error) {
 	rt_end := time.Now().UnixNano()
 	rt["connect_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
 
-	collection := client.Database("wdop_service_available").Collection("dbrt")
+	collection := client.Database(*m.Mongodb).Collection("dbrt")
 
 	rt_begin = time.Now().UnixNano()
 	err = collection.FindOne(context.TODO(), bson.M{}).Decode(&dbrtfind)
@@ -75,30 +82,41 @@ func (m Mongort) GetMongort(mongoinstence string) (map[string]float64, error) {
 	rt_end = time.Now().UnixNano()
 	rt["find_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
 
-	rt_begin = time.Now().UnixNano()
-	_, err = collection.DeleteOne(context.TODO(), bson.M{})
+	err = client.Database("wdop_service_available").RunCommand(context.TODO(), bson.D{{Key: "isMaster", Value: 1}}).Decode(&ismaster)
 	if err != nil {
 		return rt, errors.New(err.Error())
 	}
-	rt_end = time.Now().UnixNano()
-	rt["delete_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
 
-	rt_begin = time.Now().UnixNano()
-	insertResult, err := collection.InsertOne(context.TODO(), DbrtFind{time.Now().Unix()})
-	if err != nil {
-		return rt, errors.New(err.Error())
-	}
-	rt_end = time.Now().UnixNano()
-	rt["insert_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
+	if ismaster.IsMaster {
+		rt_begin = time.Now().UnixNano()
+		insertResult, err := collection.InsertOne(context.TODO(), DbrtFind{time.Now().Unix()})
+		if err != nil {
+			return rt, errors.New(err.Error())
+		}
+		rt_end = time.Now().UnixNano()
+		rt["insert_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
 
-	update := bson.M{"$set": DbrtFind{time.Now().Unix()}}
-	rt_begin = time.Now().UnixNano()
-	_, err = collection.UpdateOne(context.TODO(), bson.M{"_id": insertResult.InsertedID}, update)
-	if err != nil {
-		return rt, errors.New(err.Error())
+		update := bson.M{"$set": DbrtFind{time.Now().Unix()}}
+		rt_begin = time.Now().UnixNano()
+		_, err = collection.UpdateOne(context.TODO(), bson.M{"_id": insertResult.InsertedID}, update)
+		if err != nil {
+			return rt, errors.New(err.Error())
+		}
+		rt_end = time.Now().UnixNano()
+		rt["update_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
+
+		rt_begin = time.Now().UnixNano()
+		_, err = collection.DeleteOne(context.TODO(), bson.M{})
+		if err != nil {
+			return rt, nil
+		}
+		rt_end = time.Now().UnixNano()
+		rt["delete_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
+	} else {
+		rt["delete_rt"] = -2
+		rt["insert_rt"] = -2
+		rt["update_rt"] = -2
 	}
-	rt_end = time.Now().UnixNano()
-	rt["update_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
 
 	return rt, nil
 }
@@ -111,53 +129,55 @@ func (m Mongort) Scrape(ch chan<- prometheus.Metric) error {
 	var mywg sync.WaitGroup
 	mych := make(chan string, 16)
 
-	for i := 0; i < m.Mutithreads; i++ {
+	for i := 0; i < *m.Mutithreads; i++ {
 		mywg.Add(1)
 
 		go func() {
 			defer mywg.Done()
 
-			for mongoinstence := range mych {
-				myrt, err := m.GetMongort(mongoinstence)
+			for mongoinstance := range mych {
+				myrt, err := m.GetMongort(mongoinstance)
 				if err != nil {
-					log.Println(err)
+					logrus.Errorf("Scraper mongo %s error: %v", mongoinstance, err)
 				}
 
 				ch <- prometheus.MustNewConstMetric(
-					NewDesc("mongo_response_time", "connect_us", "mongo connect response time", []string{}, prometheus.Labels{"targetinstance": mongoinstence}),
+					NewDesc("mongo_response_time", "connect_us", "mongo connect response time", []string{}, prometheus.Labels{"targetinstance": mongoinstance}),
 					prometheus.GaugeValue,
 					myrt["connect_rt"],
 				)
 
 				ch <- prometheus.MustNewConstMetric(
-					NewDesc("mongo_response_time", "find_us", "mongo find response time", []string{}, prometheus.Labels{"targetinstance": mongoinstence}),
+					NewDesc("mongo_response_time", "find_us", "mongo find response time", []string{}, prometheus.Labels{"targetinstance": mongoinstance}),
 					prometheus.GaugeValue,
 					myrt["find_rt"],
 				)
 
-				ch <- prometheus.MustNewConstMetric(
-					NewDesc("mongo_response_time", "delete_us", "mongo delete response time", []string{}, prometheus.Labels{"targetinstance": mongoinstence}),
-					prometheus.GaugeValue,
-					myrt["delete_rt"],
-				)
+				if myrt["delete_rt"] != -2 {
+					ch <- prometheus.MustNewConstMetric(
+						NewDesc("mongo_response_time", "delete_us", "mongo delete response time", []string{}, prometheus.Labels{"targetinstance": mongoinstance}),
+						prometheus.GaugeValue,
+						myrt["delete_rt"],
+					)
 
-				ch <- prometheus.MustNewConstMetric(
-					NewDesc("mongo_response_time", "insert_us", "mongo insert response time", []string{}, prometheus.Labels{"targetinstance": mongoinstence}),
-					prometheus.GaugeValue,
-					myrt["insert_rt"],
-				)
+					ch <- prometheus.MustNewConstMetric(
+						NewDesc("mongo_response_time", "insert_us", "mongo insert response time", []string{}, prometheus.Labels{"targetinstance": mongoinstance}),
+						prometheus.GaugeValue,
+						myrt["insert_rt"],
+					)
 
-				ch <- prometheus.MustNewConstMetric(
-					NewDesc("mongo_response_time", "update_us", "mongo update response time", []string{}, prometheus.Labels{"targetinstance": mongoinstence}),
-					prometheus.GaugeValue,
-					myrt["update_rt"],
-				)
+					ch <- prometheus.MustNewConstMetric(
+						NewDesc("mongo_response_time", "update_us", "mongo update response time", []string{}, prometheus.Labels{"targetinstance": mongoinstance}),
+						prometheus.GaugeValue,
+						myrt["update_rt"],
+					)
+				}
 			}
 		}()
 	}
 
-	for _, mongoinstence := range strings.Split(m.Mongoinstences, ",") {
-		mych <- mongoinstence
+	for _, mongoinstance := range strings.Split(*m.Mongoinstances, ",") {
+		mych <- mongoinstance
 	}
 
 	close(mych)

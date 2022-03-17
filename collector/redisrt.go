@@ -2,7 +2,6 @@ package collector
 
 import (
 	"errors"
-	"log"
 	"math"
 	"strings"
 	"sync"
@@ -10,11 +9,12 @@ import (
 
 	"github.com/go-redis/redis"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 )
 
 type Redisrt struct {
-	Redisinstences string
-	Mutithreads    int
+	Redisinstances *string
+	Mutithreads    *int
 }
 
 func (Redisrt) GetRedisrt(redisinstance string) (map[string]float64, error) {
@@ -43,19 +43,22 @@ func (Redisrt) GetRedisrt(redisinstance string) (map[string]float64, error) {
 	_, err := client.Get("dbrt_exporter").Result()
 	rt_end = time.Now().UnixNano()
 	if err == redis.Nil {
-		log.Println("dbrt_exporter does not exists")
 	} else if err != nil {
 		return rt, errors.New(err.Error())
 	}
 	rt["get_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
 
-	rt_begin = time.Now().UnixNano()
-	err = client.Set("dbrt_exporter", "dbrt_exporter", 0).Err()
-	if err != nil {
-		return rt, nil
+	if strings.Split(client.Info("Replication").String(), "\r\n")[1] == "role:master" {
+		rt_begin = time.Now().UnixNano()
+		err = client.Set("dbrt_exporter", time.Now().Unix(), 0).Err()
+		if err != nil {
+			return rt, errors.New(err.Error())
+		}
+		rt_end = time.Now().UnixNano()
+		rt["set_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
+	} else {
+		rt["set_rt"] = -2
 	}
-	rt_end = time.Now().UnixNano()
-	rt["set_rt"] = math.Ceil(float64(rt_end-rt_begin) / 1000)
 
 	return rt, nil
 }
@@ -68,44 +71,46 @@ func (r Redisrt) Scrape(ch chan<- prometheus.Metric) error {
 	var mywg sync.WaitGroup
 	mych := make(chan string, 16)
 
-	for i := 0; i < r.Mutithreads; i++ {
+	for i := 0; i < *r.Mutithreads; i++ {
 		mywg.Add(1)
 
 		go func() {
 			defer mywg.Done()
 
-			for redisinstence := range mych {
-				myrt, err := r.GetRedisrt(redisinstence)
+			for redisinstance := range mych {
+				myrt, err := r.GetRedisrt(redisinstance)
 				if err != nil {
-					log.Println(err)
+					logrus.Errorf("Scraper redis %s error: %v", strings.Split(redisinstance, "@@")[1], err)
 				}
 
 				ch <- prometheus.MustNewConstMetric(
-					NewDesc("redis_response_time", "connect_us", "redis connect response time", []string{}, prometheus.Labels{"targetinstance": strings.Split(redisinstence, "@@")[1]}),
+					NewDesc("redis_response_time", "connect_us", "redis connect response time", []string{}, prometheus.Labels{"targetinstance": strings.Split(redisinstance, "@@")[1]}),
 					prometheus.GaugeValue,
 					myrt["connect_rt"],
 				)
 
 				ch <- prometheus.MustNewConstMetric(
-					NewDesc("redis_response_time", "get_us", "redis get response time", []string{}, prometheus.Labels{"targetinstance": strings.Split(redisinstence, "@@")[1]}),
+					NewDesc("redis_response_time", "get_us", "redis get response time", []string{}, prometheus.Labels{"targetinstance": strings.Split(redisinstance, "@@")[1]}),
 					prometheus.GaugeValue,
 					myrt["get_rt"],
 				)
 
-				ch <- prometheus.MustNewConstMetric(
-					NewDesc("redis_response_time", "set_us", "redis set response time", []string{}, prometheus.Labels{"targetinstance": strings.Split(redisinstence, "@@")[1]}),
-					prometheus.GaugeValue,
-					myrt["set_rt"],
-				)
+				if myrt["set_rt"] != -2 {
+					ch <- prometheus.MustNewConstMetric(
+						NewDesc("redis_response_time", "set_us", "redis set response time", []string{}, prometheus.Labels{"targetinstance": strings.Split(redisinstance, "@@")[1]}),
+						prometheus.GaugeValue,
+						myrt["set_rt"],
+					)
+				}
 			}
 		}()
 	}
 
-	for _, redisinstence := range strings.Split(r.Redisinstences, ",") {
-		if len(strings.Split(redisinstence, "@@")) == 2 {
-			mych <- redisinstence
+	for _, redisinstance := range strings.Split(*r.Redisinstances, ",") {
+		if len(strings.Split(redisinstance, "@@")) == 2 {
+			mych <- redisinstance
 		} else {
-			log.Println("The format of Redis instance is error:", redisinstence)
+			logrus.Error("The format of Redis instance is error: ", redisinstance)
 		}
 	}
 

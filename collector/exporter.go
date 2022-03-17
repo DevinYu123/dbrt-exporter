@@ -1,10 +1,10 @@
 package collector
 
 import (
-	"log"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -105,7 +105,7 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 			label := scraper.Name()
 			err = scraper.Scrape(ch)
 			if err != nil {
-				log.Printf("scraper %s: %s", scraper.Name(), err)
+				logrus.Errorf("scraper %s: %s", scraper.Name(), err)
 				e.metrics.ScrapeErrors.WithLabelValues(label).Inc()
 				e.metrics.Error.Set(1)
 			}
